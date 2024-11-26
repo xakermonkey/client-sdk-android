@@ -46,6 +46,7 @@ import io.livekit.android.room.track.TrackPublication
 import io.livekit.android.room.track.VideoCaptureParameter
 import io.livekit.android.room.track.VideoCodec
 import io.livekit.android.room.track.VideoEncoding
+import io.livekit.android.room.track.VideoPreset
 import io.livekit.android.room.util.EncodingUtils
 import io.livekit.android.util.LKLog
 import io.livekit.android.util.flow
@@ -546,6 +547,7 @@ internal constructor(
         var encoding = options.videoEncoding
         val simulcast = options.simulcast
         val scalabilityMode = options.scalabilityMode
+        val customResolutions = options.customResolutions
 
         if ((encoding == null && !simulcast) || width == 0 || height == 0) {
             return emptyList()
@@ -564,42 +566,26 @@ internal constructor(
             encodings.add(rtpEncoding)
             return encodings
         } else if (simulcast) {
-            val presets = EncodingUtils.presetsForResolution(width, height)
-            val midPreset = presets[1]
-            val lowPreset = presets[0]
+            val presets = customResolutions ?: EncodingUtils.presetsForResolution(width, height)
 
-            fun addEncoding(videoEncoding: VideoEncoding, scale: Double) {
-                if (scale < 1.0) {
-                    LKLog.w { "Discarding encoding with a scale < 1.0: $scale." }
-                    return
+            fun addEncoding(videoPreset: VideoPreset) {
+                val presetWidth = videoPreset.capture.width
+                val presetHeight = videoPreset.capture.height
+
+                if (presetWidth <= width && presetHeight <= height) {
+                    val scale = max(width, height).toDouble() / max(presetWidth, presetHeight)
+                    if (scale >= 1.0) {
+                        val rid = EncodingUtils.VIDEO_RIDS[encodings.size]
+                        encodings.add(videoPreset.encoding.toRtpEncoding(rid, scale))
+                    } else {
+                        LKLog.w { "Discarding encoding for preset $videoPreset: scale < 1.0" }
+                    }
                 }
-                if (encodings.size >= EncodingUtils.VIDEO_RIDS.size) {
-                    throw IllegalStateException("Attempting to add more encodings than we have rids for!")
-                }
-                // encodings is mutable, so this will grab next available rid
-                val rid = EncodingUtils.VIDEO_RIDS[encodings.size]
-                encodings.add(videoEncoding.toRtpEncoding(rid, scale))
             }
 
-            // if resolution is high enough, we send both h and q res.
-            // otherwise only send h
-            val size = max(width, height)
+            presets.forEach { addEncoding(it) }
 
-            fun calculateScaleDown(captureParam: VideoCaptureParameter): Double {
-                val targetSize = max(captureParam.width, captureParam.height)
-                return size / targetSize.toDouble()
-            }
-            if (size >= 960) {
-                val lowScale = calculateScaleDown(lowPreset.capture)
-                val midScale = calculateScaleDown(midPreset.capture)
-
-                addEncoding(lowPreset.encoding, lowScale)
-                addEncoding(midPreset.encoding, midScale)
-            } else {
-                val lowScale = calculateScaleDown(lowPreset.capture)
-                addEncoding(lowPreset.encoding, lowScale)
-            }
-            addEncoding(encoding, 1.0)
+            encodings.add(encoding.toRtpEncoding())
         } else {
             encodings.add(encoding.toRtpEncoding())
         }
@@ -1033,6 +1019,8 @@ abstract class BaseVideoTrackPublishOptions {
      * null value indicates default value (maintain framerate).
      */
     abstract val degradationPreference: RtpParameters.DegradationPreference?
+
+    abstract val customResolutions: List<VideoPreset>?
 }
 
 data class VideoTrackPublishDefaults(
@@ -1042,6 +1030,7 @@ data class VideoTrackPublishDefaults(
     override val scalabilityMode: String? = null,
     override val backupCodec: BackupVideoCodec? = null,
     override val degradationPreference: RtpParameters.DegradationPreference? = null,
+    override val customResolutions: List<VideoPreset>? = null,
 ) : BaseVideoTrackPublishOptions()
 
 data class VideoTrackPublishOptions(
@@ -1054,6 +1043,7 @@ data class VideoTrackPublishOptions(
     override val source: Track.Source? = null,
     override val stream: String? = null,
     override val degradationPreference: RtpParameters.DegradationPreference? = null,
+    override val customResolutions: List<VideoPreset>? = null,
 ) : BaseVideoTrackPublishOptions(), TrackPublishOptions {
     constructor(
         name: String? = null,
